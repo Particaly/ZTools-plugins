@@ -216,9 +216,8 @@ Important:
 - When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
 - NEVER just announce or mention a skill in your text response without actually calling this tool
 - This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
-- Only use skills listed in "Available skills" below
-- Do Not invoke a skill that is already Activated
-- Only the skills listed below are available， do not make assumptions about other skills.
+- Do Not invoke a skill that is already Launched
+- Only the skills listed below are available and only use skills listed in "Available skills" below， do not make assumptions about other skills.
 
 Available skills:
 ${availableSkillsText}
@@ -246,18 +245,18 @@ ${availableSkillsText}
                         type: "string"
                     },
                     context: {
-                        description: "Optional context/background information for the Sub-Agent (e.g. 'The user is on Windows', 'Previous code analysis results').",
+                        description: "Optional context/background information for the Sub-Agent (e.g. 'The user is on Windows', 'Previous code analysis results'). Required for Sub-Agent mode.",
                         type: "string"
                     },
                     tools: {
                         type: "array",
                         items: { type: "string" },
-                        description: "Optional. Explicitly specify tool names to grant to the Sub-Agent. Defaults to all builtin tools if omitted."
+                        description: "Optional. Explicitly specify tool names to grant to the Sub-Agent. Defaults to all builtin tools if omitted. Required for Sub-Agent mode."
                     },
                     planning_level: {
                         type: "string",
                         enum: ["fast", "medium", "high"],
-                        description: "Complexity level for Sub-Agent. Defaults to 'medium'."
+                        description: "Complexity level for Sub-Agent. Defaults to 'medium'. Required for Sub-Agent mode."
                     }
                 },
                 required: ["skill"],
@@ -290,7 +289,7 @@ function resolveSkillInvocation(skillRootPath, skillName, toolArgsObj) {
     if (instructions.includes('$ARGUMENTS')) {
         instructions = instructions.replace(/\$ARGUMENTS/g, argsInput);
     } 
-    // 2. [新增] 如果模板中没有占位符，但 AI 传了 args，则按官方文档规范追加到末尾
+    // 2. 如果模板中没有占位符，但 AI 传了 args，则按官方文档规范追加到末尾
     else if (argsInput) {
         instructions += `\n\n### Input Arguments\n${argsInput}`;
     }
@@ -387,6 +386,8 @@ function resolveSkillInvocation(skillRootPath, skillName, toolArgsObj) {
         response += `\n\n### Current Task Request\n${taskInput}`;
     }
 
+    response += `\n\n### End of Skill Instructions\n ${targetSkill.name} launched successfully. Please use the skill correctly according to the Instructions, and do not repeatedly launch the same skill. `
+
     return response;
 }
 
@@ -447,9 +448,9 @@ function exportSkillToPackage(skillRootPath, skillId, outputDir) {
 }
 
 /**
- * 解压 .skill 文件到临时目录
+ * 解压 .skill 或 .zip 文件到临时目录，并智能寻找包含 SKILL.md 的实际目录
  * @param {string} filePath .skill 文件路径
- * @returns {Promise<string>} 解压后的临时目录路径
+ * @returns {Promise<string>} 包含 SKILL.md 的真实目录路径
  */
 function extractSkillPackage(filePath) {
     return new Promise((resolve, reject) => {
@@ -462,7 +463,25 @@ function extractSkillPackage(filePath) {
             }
 
             zip.extractAllTo(tempDir, true);
-            resolve(tempDir);
+            
+            // 智能查找 SKILL.md 所在目录
+            let finalDir = tempDir;
+            const skillPath = path.join(tempDir, 'SKILL.md');
+            
+            // 如果根目录下没有 SKILL.md，尝试寻找唯一的有效子文件夹
+            if (!fs.existsSync(skillPath)) {
+                const items = fs.readdirSync(tempDir, { withFileTypes: true });
+                // 排除系统生成的隐藏目录或 Mac 资源目录
+                const dirs = items.filter(item => item.isDirectory() && !item.name.startsWith('.') && item.name !== '__MACOSX');
+                if (dirs.length === 1) {
+                    const subDir = path.join(tempDir, dirs[0].name);
+                    if (fs.existsSync(path.join(subDir, 'SKILL.md'))) {
+                        finalDir = subDir;
+                    }
+                }
+            }
+
+            resolve(finalDir);
         } catch (e) {
             reject(e);
         }

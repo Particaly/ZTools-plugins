@@ -1,12 +1,13 @@
 <script setup>
 import { computed, ref, nextTick } from 'vue';
 import { Bubble, Thinking, XMarkdown } from 'vue-element-plus-x';
-import { ElTooltip, ElButton, ElInput, ElCollapse, ElCollapseItem, ElIcon, ElCheckbox, ElTag } from 'element-plus';
-import { DocumentCopy, Refresh, Delete, Document, CaretTop, CaretBottom, Edit, Check, Close, CloseBold } from '@element-plus/icons-vue';
+import { ElTooltip, ElButton, ElInput, ElCollapse, ElCollapseItem, ElIcon, ElCheckbox, ElTag, ElMessage } from 'element-plus';
+import { DocumentCopy, Refresh, Delete, Document, CaretTop, CaretBottom, Edit, Check, Close, CloseBold, Picture } from '@element-plus/icons-vue';
 import 'katex/dist/katex.min.css';
 import DOMPurify from 'dompurify';
+import html2canvas from 'html2canvas';
 
-import { formatTimestamp, formatMessageText, sanitizeToolArgs } from '../utils/formatters.js';
+import { formatTimestamp, formatMessageText, sanitizeToolArgs, formatToolResult } from '../utils/formatters.js';
 
 const props = defineProps({
   message: Object,
@@ -24,6 +25,7 @@ const emit = defineEmits(['copy-text', 're-ask', 'delete-message', 'toggle-colla
 const editInputRef = ref(null);
 const isEditing = ref(false);
 const editedContent = ref('');
+const messageWrapperRef = ref(null);
 
 // 计算耗时或显示开始时间
 const timeDisplay = computed(() => {
@@ -50,7 +52,204 @@ const timeDisplay = computed(() => {
   return formattedStart;
 });
 
-// 优化 Loading 显示逻辑：如果是最后一条消息 && 正在加载 && 没有正在进行的思考内容
+
+const onCopyImage = async () => {
+  if (!messageWrapperRef.value) return;
+  
+  const loadingMsg = ElMessage.info({ message: '正在生成图片...', duration: 0 });
+  
+  // 延时让 UI 有机会渲染 Loading
+  setTimeout(async () => {
+    let wrapper = null;
+    try {
+      // 1. 获取 App 全局背景节点
+      const originalBgBase = document.querySelector('.window-bg-base');
+      const originalBgLayer = document.querySelector('.window-bg-layer');
+      
+      // 2. 获取兜底主题色
+      const rootStyle = getComputedStyle(document.documentElement);
+      let themeBgColor = rootStyle.getPropertyValue('--el-bg-color').trim();
+      const isDark = document.documentElement.classList.contains('dark');
+      if (!themeBgColor || themeBgColor === 'transparent' || themeBgColor === 'rgba(0, 0, 0, 0)') {
+          themeBgColor = isDark ? '#212121' : '#FFFFFD'; 
+      }
+
+      // 3. 构建截图容器 (Wrapper)
+      // 设置最小宽度
+      const MIN_IMAGE_WIDTH = 800; 
+      const targetWidth = Math.max(messageWrapperRef.value.clientWidth, MIN_IMAGE_WIDTH);
+
+      wrapper = document.createElement('div');
+      wrapper.style.cssText = `
+        position: fixed; top: -10000px; left: 0; z-index: -9999;
+        width: ${targetWidth}px;
+        box-sizing: content-box; padding: 20px;
+        display: flex; flex-direction: column; overflow: hidden;
+      `;
+      wrapper.style.backgroundColor = themeBgColor;
+
+      // 3.1 重建背景层 (Base)
+      const bgBaseClone = document.createElement('div');
+      bgBaseClone.style.cssText = 'position:absolute; top:0; left:0; width:100%; height:100%; z-index: 0;';
+      if (originalBgBase) {
+          bgBaseClone.style.backgroundColor = getComputedStyle(originalBgBase).backgroundColor;
+      } else {
+          bgBaseClone.style.backgroundColor = themeBgColor;
+      }
+      wrapper.appendChild(bgBaseClone);
+
+      // 3.2 重建背景层 (Layer)
+      if (originalBgLayer) {
+          const layerComputed = getComputedStyle(originalBgLayer);
+          if (layerComputed.backgroundImage !== 'none' && layerComputed.opacity !== '0') {
+              const bgLayerClone = document.createElement('div');
+              bgLayerClone.style.cssText = `
+                  position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1;
+                  background-image: ${layerComputed.backgroundImage};
+                  background-size: ${layerComputed.backgroundSize};
+                  background-position: ${layerComputed.backgroundPosition};
+                  background-repeat: ${layerComputed.backgroundRepeat};
+                  opacity: ${layerComputed.opacity};
+                  filter: ${layerComputed.filter};
+              `;
+              wrapper.appendChild(bgLayerClone);
+          }
+      }
+
+      // 4. 克隆消息内容
+      const clone = messageWrapperRef.value.cloneNode(true);
+      clone.style.position = 'relative';
+      clone.style.zIndex = '2'; 
+      clone.style.margin = '0';
+      clone.style.maxWidth = '100%';
+      
+      const footer = clone.querySelector('.message-footer');
+      if (footer) footer.remove();
+
+      if (props.message.role === 'user') {
+          clone.style.alignSelf = 'flex-end';
+      } else {
+          clone.style.alignSelf = 'flex-start';
+      }
+
+      // A. 气泡本体
+      const originalBubble = messageWrapperRef.value.querySelector('.el-bubble-content');
+      const clonedBubble = clone.querySelector('.el-bubble-content');
+      
+      if (originalBubble && clonedBubble) {
+          const comp = getComputedStyle(originalBubble);
+          clonedBubble.style.backgroundColor = comp.backgroundColor;
+          clonedBubble.style.color = comp.color;
+          clonedBubble.style.border = comp.border;
+          clonedBubble.style.borderRadius = comp.borderRadius;
+          clonedBubble.style.boxShadow = comp.boxShadow;
+          clonedBubble.style.backdropFilter = 'none';
+          clonedBubble.style.overflow = 'hidden'; 
+      }
+
+      // B. 思考按钮
+      const originalThinkingTriggers = messageWrapperRef.value.querySelectorAll('.el-thinking .trigger');
+      const clonedThinkingTriggers = clone.querySelectorAll('.el-thinking .trigger');
+      originalThinkingTriggers.forEach((orig, i) => {
+          if (clonedThinkingTriggers[i]) {
+              const comp = getComputedStyle(orig);
+              clonedThinkingTriggers[i].style.backgroundColor = comp.backgroundColor;
+              clonedThinkingTriggers[i].style.border = comp.border;
+              clonedThinkingTriggers[i].style.borderRadius = comp.borderRadius;
+              clonedThinkingTriggers[i].style.color = comp.color;
+          }
+      });
+
+      // E. 思考内容块
+      const originalThinkingContent = messageWrapperRef.value.querySelectorAll('.el-thinking .content pre');
+      const clonedThinkingContent = clone.querySelectorAll('.el-thinking .content pre');
+      originalThinkingContent.forEach((orig, i) => {
+          if (clonedThinkingContent[i]) {
+              const comp = getComputedStyle(orig);
+              clonedThinkingContent[i].style.borderRadius = comp.borderRadius;
+              clonedThinkingContent[i].style.backgroundColor = comp.backgroundColor;
+              clonedThinkingContent[i].style.border = comp.border;
+              clonedThinkingContent[i].style.color = comp.color;
+              clonedThinkingContent[i].style.whiteSpace = 'pre-wrap';
+              clonedThinkingContent[i].style.overflow = 'visible';
+              clonedThinkingContent[i].style.height = 'auto';
+              clonedThinkingContent[i].style.maxHeight = 'none';
+          }
+      });
+
+      // C. 普通代码块
+      const originalPres = messageWrapperRef.value.querySelectorAll('pre:not(.el-thinking *)');
+      const clonedPres = clone.querySelectorAll('pre:not(.el-thinking *)');
+      originalPres.forEach((orig, i) => {
+          if (clonedPres[i]) {
+              const comp = getComputedStyle(orig);
+              clonedPres[i].style.backgroundColor = comp.backgroundColor;
+              clonedPres[i].style.color = comp.color;
+              clonedPres[i].style.border = comp.border;
+              clonedPres[i].style.borderRadius = comp.borderRadius;
+              clonedPres[i].style.whiteSpace = 'pre-wrap';
+              clonedPres[i].style.overflow = 'visible';
+              clonedPres[i].style.height = 'auto';
+              clonedPres[i].style.maxHeight = 'none';
+          }
+      });
+
+      // D. Markdown 容器
+      clone.querySelectorAll('.markdown-wrapper').forEach(md => {
+          md.style.height = 'auto';
+          md.style.overflow = 'visible';
+          md.classList.remove('collapsed');
+      });
+
+      wrapper.appendChild(clone);
+      document.body.appendChild(wrapper);
+
+      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 200)));
+
+      // 5. 截图
+      const canvas = await html2canvas(wrapper, {
+        useCORS: true, 
+        allowTaint: true,
+        backgroundColor: null,
+        scale: 2, 
+        logging: false,
+        ignoreElements: (el) => false
+      });
+
+      // 6. 清理
+      document.body.removeChild(wrapper);
+      wrapper = null;
+
+      // 7. 导出
+      const dataUrl = canvas.toDataURL('image/png');
+      
+      requestAnimationFrame(async () => {
+          try {
+              await window.api.copyImage(dataUrl);
+              loadingMsg.close();
+              ElMessage.success('消息图片已复制');
+          } catch (clipErr) {
+              console.error(clipErr);
+              loadingMsg.close();
+              ElMessage.error('写入剪贴板失败');
+          }
+      });
+
+    } catch (error) {
+      console.error('截图失败:', error);
+      loadingMsg.close();
+      ElMessage.error('生成图片失败');
+      if (wrapper && wrapper.parentNode) {
+          wrapper.parentNode.removeChild(wrapper);
+      }
+      const orphans = document.querySelectorAll('[style*="-10000px"]');
+      orphans.forEach(el => el.remove());
+    }
+  }, 50);
+};
+
+
+// 如果是最后一条消息 && 正在加载 && 没有正在进行的思考内容
 const showBubbleLoading = computed(() => {
   if (!props.isLastMessage || !props.isLoading) return false;
   
@@ -290,7 +489,7 @@ const truncateFilename = (filename, maxLength = 30) => {
   <div class="chat-message" v-if="message.role !== 'system'">
 
     <!-- 用户消息 -->
-    <div v-if="message.role === 'user'" class="message-wrapper user-wrapper">
+    <div v-if="message.role === 'user'" class="message-wrapper user-wrapper" ref="messageWrapperRef">
       <div class="message-meta-header user-meta-header">
         <span class="timestamp" v-if="message.timestamp">{{ formatTimestamp(message.timestamp) }}</span>
         <img :src="userAvatar" alt="User Avatar" @click="onAvatarClick('user', $event)"
@@ -319,6 +518,9 @@ const truncateFilename = (filename, maxLength = 30) => {
             <div class="footer-wrapper">
               <div class="footer-actions">
                 <el-button :icon="DocumentCopy" @click="onCopy" size="small" circle />
+                <el-tooltip content="复制为图片" placement="top" :show-after="500">
+                  <el-button :icon="Picture" @click="onCopyImage" size="small" circle />
+                </el-tooltip>
                 <el-button v-if="isEditable" :icon="Edit" @click="emit('edit-message-requested', index)" size="small"
                   circle />
                 <el-button v-if="shouldShowCollapseButton" :icon="isCollapsed ? CaretBottom : CaretTop"
@@ -341,7 +543,7 @@ const truncateFilename = (filename, maxLength = 30) => {
     </div>
 
     <!-- AI 消息 -->
-    <div v-if="message.role === 'assistant'" class="message-wrapper ai-wrapper">
+    <div v-if="message.role === 'assistant'" class="message-wrapper ai-wrapper" ref="messageWrapperRef">
       <div class="message-meta-header ai-meta-header">
         <img :src="aiAvatar" alt="AI Avatar" @click="onAvatarClick('assistant', $event)"
           class="chat-avatar-top ai-avatar">
@@ -423,7 +625,7 @@ const truncateFilename = (filename, maxLength = 30) => {
                       v-if="toolCall.result && toolCall.result !== '等待批准...' && toolCall.result !== '执行中...'">
                       <strong>结果:</strong>
                       <div class="tool-result-wrapper">
-                        <pre><code>{{ toolCall.result }}</code></pre>
+                        <pre><code>{{ formatToolResult(toolCall.result) }}</code></pre>
                       </div>
                     </div>
                   </div>
@@ -447,6 +649,9 @@ const truncateFilename = (filename, maxLength = 30) => {
           <div class="message-footer">
             <div class="footer-actions">
               <el-button :icon="DocumentCopy" @click="onCopy" size="small" circle />
+              <el-tooltip content="复制为图片" placement="top" :show-after="500">
+                  <el-button :icon="Picture" @click="onCopyImage" size="small" circle />
+                </el-tooltip>
               <el-button v-if="isEditable" :icon="Edit" @click="emit('edit-message-requested', index)" size="small"
                 circle />
               <el-button v-if="shouldShowCollapseButton" :icon="isCollapsed ? CaretBottom : CaretTop"

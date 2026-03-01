@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, nextTick, watch, h, computed, defineAsyncComponent } from 'vue';
 import { ElContainer, ElMain, ElDialog, ElImageViewer, ElMessage, ElMessageBox, ElInput, ElButton, ElCheckbox, ElButtonGroup, ElTag, ElTooltip, ElIcon, ElAvatar, ElSwitch } from 'element-plus';
 import { createClient } from "webdav/web";
-import { DocumentCopy, QuestionFilled, Download, Search, Tools, CaretRight, Collection, Warning, Cpu, Top, Bottom, ArrowUp, ArrowDown } from '@element-plus/icons-vue';
+import { DocumentCopy, QuestionFilled, Download, Search, Tools, CaretRight, Collection, Warning, Cpu, ArrowUp, ArrowDown } from '@element-plus/icons-vue';
 
 import TitleBar from './components/TitleBar.vue';
 import ChatHeader from './components/ChatHeader.vue';
@@ -12,6 +12,7 @@ import ModelSelectionDialog from './components/ModelSelectionDialog.vue';
 
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
+import html2canvas from 'html2canvas';
 
 import TextSearchUI from './utils/TextSearchUI.js';
 import { formatTimestamp, sanitizeToolArgs } from './utils/formatters.js';
@@ -185,6 +186,7 @@ const systemPromptContent = ref('');
 const imageViewerVisible = ref(false);
 const imageViewerSrcList = ref([]);
 const imageViewerInitialIndex = ref(0);
+const currentImageViewerIndex = ref(0);
 
 const toolCallControllers = ref(new Map());
 const tempSessionMcpServerIds = ref([]);
@@ -649,8 +651,19 @@ const handleMainClick = async (event) => {
     event.preventDefault();
     event.stopPropagation();
     if (img.src) {
-      imageViewerSrcList.value = [img.src];
-      imageViewerInitialIndex.value = 0;
+      // 收集当前所有渲染成功的图片
+      const allImages = Array.from(document.querySelectorAll('.markdown-wrapper img'));
+      const validSrcList = allImages.map(imgEl => imgEl.src).filter(Boolean);
+      
+      let initialIndex = validSrcList.indexOf(img.src);
+      if (initialIndex === -1) {
+          initialIndex = 0;
+          validSrcList.unshift(img.src);
+      }
+      
+      imageViewerSrcList.value = validSrcList;
+      imageViewerInitialIndex.value = initialIndex;
+      currentImageViewerIndex.value = initialIndex;
       imageViewerVisible.value = true;
     }
     return;
@@ -1216,6 +1229,8 @@ onMounted(async () => {
 
     let shouldDirectSend = false;
     let isFileDirectSend = false;
+    let isSessionRestored = false;
+
     if (data) {
       basic_msg.value = { code: data.code, type: data.type, payload: data.payload };
       if (data.filename) defaultConversationName.value = data.filename.replace(/\.json$/i, '');
@@ -1224,7 +1239,12 @@ onMounted(async () => {
         let sessionLoaded = false;
         try {
           let old_session = JSON.parse(data.payload);
-          if (old_session && old_session.anywhere_history === true) { sessionLoaded = true; await loadSession(old_session); autoCloseOnBlur.value = false; }
+          if (old_session && old_session.anywhere_history === true) { 
+            sessionLoaded = true; 
+            isSessionRestored = true; // 标记会话已恢复
+            await loadSession(old_session); 
+            autoCloseOnBlur.value = false; 
+          }
         } catch (error) { }
         if (!sessionLoaded) {
           if (CODE.value.trim().toLowerCase().includes(data.payload.trim().toLowerCase())) { /* do nothing */ }
@@ -1249,7 +1269,10 @@ onMounted(async () => {
           let sessionLoaded = false;
           if (data.payload.length === 1 && data.payload[0].path.toLowerCase().endsWith('.json')) {
             const fileObject = await window.api.handleFilePath(data.payload[0].path);
-            if (fileObject) { sessionLoaded = await checkAndLoadSessionFromFile(fileObject); }
+            if (fileObject) { 
+              sessionLoaded = await checkAndLoadSessionFromFile(fileObject); 
+              if (sessionLoaded) isSessionRestored = true; // 标记会话已恢复
+            }
           }
           if (!sessionLoaded) {
             const fileProcessingPromises = data.payload.map((fileInfo) => processFilePath(fileInfo.path));
@@ -1266,28 +1289,29 @@ onMounted(async () => {
       window.addEventListener('blur', closePage);
     }
 
-    // --- MCP 加载逻辑 ---
-    const defaultMcpServers = currentPromptConfig.defaultMcpServers || [];
-    let mcpServersToLoad = [...defaultMcpServers];
+    if (!isSessionRestored) {
+      const defaultMcpServers = currentPromptConfig.defaultMcpServers || [];
+      let mcpServersToLoad = [...defaultMcpServers];
 
-    // 如果存在 Skill，强制合并内置 MCP 服务
-    if (sessionSkillIds.value.length > 0 && currentConfig.value.mcpServers) {
-      const builtinIds = Object.entries(currentConfig.value.mcpServers)
-        .filter(([, server]) => server.type === 'builtin')
-        .map(([id]) => id);
-      // 去重合并
-      mcpServersToLoad = [...new Set([...mcpServersToLoad, ...builtinIds])];
-    }
+      // 如果存在 Skill，强制合并内置 MCP 服务
+      if (sessionSkillIds.value.length > 0 && currentConfig.value.mcpServers) {
+        const builtinIds = Object.entries(currentConfig.value.mcpServers)
+          .filter(([, server]) => server.type === 'builtin')
+          .map(([id]) => id);
+        // 去重合并
+        mcpServersToLoad = [...new Set([...mcpServersToLoad, ...builtinIds])];
+      }
 
-    if (mcpServersToLoad.length > 0) {
-      // 过滤出有效的 ID
-      const validIds = mcpServersToLoad.filter(id =>
-        currentConfig.value.mcpServers && currentConfig.value.mcpServers[id]
-      );
+      if (mcpServersToLoad.length > 0) {
+        // 过滤出有效的 ID
+        const validIds = mcpServersToLoad.filter(id =>
+          currentConfig.value.mcpServers && currentConfig.value.mcpServers[id]
+        );
 
-      sessionMcpServerIds.value = [...validIds];
-      tempSessionMcpServerIds.value = [...validIds];
-      await applyMcpTools(false);
+        sessionMcpServerIds.value = [...validIds];
+        tempSessionMcpServerIds.value = [...validIds];
+        await applyMcpTools(false);
+      }
     }
 
     await fetchSkillsList();
@@ -2192,6 +2216,156 @@ const handleRenameSession = async () => {
   }
 };
 
+const saveSessionAsImage = async () => {
+  const now = new Date();
+  const fileTimestamp = `${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+  const defaultBasename = defaultConversationName.value || `${CODE.value || 'AI'}-${fileTimestamp}`;
+  const inputValue = ref(defaultBasename);
+
+  try {
+    await ElMessageBox({
+      title: '保存为图片',
+      message: () => h('div', null, [
+        h('p', { style: 'margin-bottom: 15px; font-size: 14px; color: var(--el-text-color-regular);' }, '请输入文件名。'),
+        h(ElInput, {
+          modelValue: inputValue.value,
+          'onUpdate:modelValue': (val) => { inputValue.value = val; },
+          placeholder: '文件名',
+          ref: (elInputInstance) => {
+            if (elInputInstance) {
+              setTimeout(() => elInputInstance.focus(), 100);
+            }
+          },
+          onKeydown: (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              document.querySelector('.filename-prompt-dialog .el-message-box__btns .el-button--primary')?.click();
+            }
+          }
+        },
+          { append: () => h('div', { class: 'input-suffix-display' }, '.png') })]),
+      showCancelButton: true, confirmButtonText: '保存', cancelButtonText: '取消', customClass: 'filename-prompt-dialog',
+      beforeClose: async (action, instance, done) => {
+        if (action === 'confirm') {
+          let finalBasename = inputValue.value.trim();
+          if (!finalBasename) { showDismissibleMessage.error('文件名不能为空'); return; }
+          const finalFilename = finalBasename + '.png';
+          instance.confirmButtonLoading = true;
+          
+          const loadingMsg = ElMessage.info({ message: '正在生成长图，请稍候...', duration: 0 });
+
+          try {
+            const element = chatContainerRef.value.$el;
+            
+            // 获取背景色
+            const computedStyle = getComputedStyle(document.documentElement);
+            let themeBgColor = computedStyle.getPropertyValue('--el-bg-color').trim();
+            if (!themeBgColor || themeBgColor === 'transparent' || themeBgColor === 'rgba(0, 0, 0, 0)') {
+                const isDark = document.documentElement.classList.contains('dark');
+                themeBgColor = isDark ? '#212121' : '#FFFFFD'; 
+            }
+
+            const clone = element.cloneNode(true);
+            
+            // 设置最小宽度
+            const MIN_IMAGE_WIDTH = 800;
+            const targetWidth = Math.max(element.clientWidth, MIN_IMAGE_WIDTH);
+
+            clone.style.width = `${targetWidth}px`;
+            clone.style.height = 'auto';
+            clone.style.maxHeight = 'none';
+            clone.style.overflow = 'visible';
+            clone.style.position = 'absolute'; 
+            clone.style.top = '0';
+            clone.style.left = '0';
+            clone.style.zIndex = '-9999';
+            
+            // 背景处理
+            if (windowBackgroundImage.value) {
+                clone.style.backgroundImage = `url('${windowBackgroundImage.value}')`;
+                clone.style.backgroundSize = 'cover';
+                clone.style.backgroundPosition = 'center';
+                clone.style.backgroundRepeat = 'no-repeat';
+                clone.style.backgroundColor = themeBgColor; 
+            } else {
+                clone.style.background = themeBgColor;
+            }
+            
+            // 强制展开代码块
+            const preElements = clone.querySelectorAll('pre');
+            preElements.forEach(pre => {
+                pre.style.whiteSpace = 'pre-wrap';
+                pre.style.overflow = 'visible';
+                pre.style.height = 'auto';
+                pre.style.maxHeight = 'none';
+            });
+
+            const mdWrappers = clone.querySelectorAll('.markdown-wrapper');
+            mdWrappers.forEach(wrapper => {
+                wrapper.style.height = 'auto';
+                wrapper.style.overflow = 'visible';
+            });
+
+            if (element.parentNode) {
+                element.parentNode.appendChild(clone);
+            } else {
+                document.body.appendChild(clone);
+            }
+
+            await new Promise(r => setTimeout(r, 500));
+
+            const canvas = await html2canvas(clone, {
+              useCORS: true,
+              allowTaint: true,
+              backgroundColor: null, 
+              scale: 2, 
+              logging: false,
+              height: clone.scrollHeight,
+              windowHeight: clone.scrollHeight,
+              x: 0, 
+              y: 0, 
+              ignoreElements: (el) => false
+            });
+
+            if (clone.parentNode) {
+                clone.parentNode.removeChild(clone);
+            }
+
+            const dataUrl = canvas.toDataURL('image/png');
+
+            const byteString = atob(dataUrl.split(',')[1]);
+            const ab = new ArrayBuffer(byteString.length);
+            const ia = new Uint8Array(ab);
+            for (let i = 0; i < byteString.length; i++) {
+              ia[i] = byteString.charCodeAt(i);
+            }
+
+            await window.api.saveFile({ 
+                title: '保存为图片', 
+                defaultPath: finalFilename, 
+                buttonLabel: '保存', 
+                filters: [{ name: 'PNG 图片', extensions: ['png'] }], 
+                fileContent: ia 
+            });
+            
+            defaultConversationName.value = finalBasename;
+            loadingMsg.close();
+            showDismissibleMessage.success('会话已成功保存为长图！');
+            done();
+          } catch (error) {
+            loadingMsg.close();
+            if (!error.message.includes('canceled by the user') && !error.message.includes('用户取消')) {
+              console.error('保存图片失败:', error);
+              showDismissibleMessage.error(`保存失败: ${error.message}`);
+            }
+            done();
+          } finally { instance.confirmButtonLoading = false; }
+        } else { done(); }
+      }
+    });
+  } catch (error) { if (error !== 'cancel' && error !== 'close') console.error('MessageBox error:', error); }
+};
+
 const handleSaveAction = async () => {
   if (autoCloseOnBlur.value) handleTogglePin();
   const isCloudEnabled = currentConfig.value.webdav?.url && currentConfig.value.webdav?.data_path;
@@ -2214,6 +2388,7 @@ const handleSaveAction = async () => {
   saveOptions.push({ title: '保存为 JSON', description: '保存为可恢复的会話文件，便于下次继续。', buttonType: 'primary', action: saveSessionAsJson, isDefault: true });
   saveOptions.push({ title: '保存为 Markdown', description: '导出为可读性更强的 .md 文件，适合分享。', buttonType: '', action: saveSessionAsMarkdown });
   saveOptions.push({ title: '保存为 HTML', description: '导出为带样式的网页文件，保留格式和图片。', buttonType: '', action: saveSessionAsHtml });
+  saveOptions.push({ title: '保存为 图片', description: '将完整聊天记录保存为长图 (.png)。', buttonType: '', action: saveSessionAsImage });
 
   const messageVNode = h('div', { class: 'save-options-list' }, saveOptions.map(opt => {
     const trigger = () => { ElMessageBox.close(); opt.action(); };
@@ -3133,7 +3308,7 @@ const askAI = async (forceSend = false) => {
                       uiToolCall.result = currentLog;
                     }
                   } else {
-                    uiToolCall.result = `[Skill Instructions Loaded]\n${toolContent}`;
+                    uiToolCall.result = toolContent;
                   }
                 }
 
@@ -3790,11 +3965,11 @@ const scrollToMessageByIndex = (index) => {
   </el-dialog>
 
   <el-image-viewer v-if="imageViewerVisible" :url-list="imageViewerSrcList" :initial-index="imageViewerInitialIndex"
-    @close="imageViewerVisible = false" :hide-on-click-modal="true" teleported />
+    @close="imageViewerVisible = false" @switch="(idx) => currentImageViewerIndex = idx" :hide-on-click-modal="true" teleported />
   <div v-if="imageViewerVisible" class="custom-viewer-actions">
-    <el-button type="primary" :icon="DocumentCopy" circle @click="handleCopyImageFromViewer(imageViewerSrcList[0])"
+    <el-button type="primary" :icon="DocumentCopy" circle @click="handleCopyImageFromViewer(imageViewerSrcList[currentImageViewerIndex])"
       title="复制图片" />
-    <el-button type="primary" :icon="Download" circle @click="handleDownloadImageFromViewer(imageViewerSrcList[0])"
+    <el-button type="primary" :icon="Download" circle @click="handleDownloadImageFromViewer(imageViewerSrcList[currentImageViewerIndex])"
       title="下载图片" />
   </div>
 
