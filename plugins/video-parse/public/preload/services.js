@@ -3,6 +3,10 @@ const https = require('node:https')
 const path = require('node:path')
 const { parseInfo } = require('./parser');
 
+window.utools = {
+  ...window.ztools,
+}
+
 // 通过 window 对象向渲染进程注入 nodejs 能力
 window.services = {
   // 读文件
