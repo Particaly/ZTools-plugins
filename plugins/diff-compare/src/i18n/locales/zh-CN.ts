@@ -1,5 +1,5 @@
-// 中文翻译
-const zh = {
+// 简体中文翻译
+const zhCN = {
   // Common
   title: '代码对比',
   toggleTheme: '切换主题',
@@ -125,6 +125,11 @@ const zh = {
   settingsTitle: '设置',
   settingsClose: '关闭',
   displayLanguage: '显示语言',
+
+  // Theme
+  themeSystem: '跟随系统',
+  themeLight: '浅色模式',
+  themeDark: '深色模式',
 }
 
-export default zh
+export default zhCN
